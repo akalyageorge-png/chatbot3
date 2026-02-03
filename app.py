@@ -1,5 +1,9 @@
 import streamlit as st
-import google.generativeai as genai
+from openai import OpenAI
+
+# Set page config FIRST - this must be the first Streamlit command
+st.set_page_config(page_title="Multilingual Medical Assistant", page_icon="🩺", layout="wide")
+
 import os
 import datetime
 import ssl
@@ -241,9 +245,9 @@ def check_rate_limit():
     # We'll be conservative and wait 35 seconds between requests
     current_time = time.time()
     time_since_last_call = current_time - st.session_state.last_api_call
-    
-    if time_since_last_call < 35:
-        return True, 35 - time_since_last_call
+   
+    if time_since_last_call < 2:  # Changed from 35 to 2 seconds
+       return True, 2 - time_since_last_call  # Changed from 35 to 2
     
     return False, 0
 
@@ -253,7 +257,7 @@ def update_last_api_call():
 
 def handle_rate_limit_error(error):
     """Handle rate limit errors with retry logic"""
-    if "429" in str(error) or "quota" in str(error).lower():
+    if "429" in str(error) or "quota" in str(error).lower() or "rate limit" in str(error).lower():
         # Extract retry delay if available
         try:
             error_str = str(error)
@@ -371,26 +375,28 @@ def get_language_name(code):
     }
     return languages.get(code, "Unknown")
 
-# --- Configuration ---
+# --- OpenAI Configuration ---
 try:
-    api_key = st.secrets["GOOGLE_API_KEY"]
+    api_key = st.secrets["OPENAI_API_KEY"]
 except (FileNotFoundError, KeyError):
-    # It's better practice to avoid hardcoding keys directly in the script.
-    # Using an environment variable is a good alternative for local development.
-    api_key = os.environ.get("GOOGLE_API_KEY", "AIzaSyASQgsp2CU5SJSEj5pMxZLsfSlszHhvxdk") # Replace with your actual key if not using secrets
-    if "YOUR_GOOGLE_API_KEY" in api_key:
-        st.warning("Please add your Google API key to secrets.toml or set it as an environment variable.")
+    # Add your key here directly for testing
+    api_key = "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"
+    
+    if "sk-proj-" in api_key:
+        st.warning("Using provided OpenAI API key. For production, add your key to secrets.toml as OPENAI_API_KEY")
 
-genai.configure(api_key=api_key)
-
-# Generation configuration for the model
-generation_config = {
-    "temperature": 0.7,
-    "top_p": 0.95,
-    "top_k": 40,
-    "max_output_tokens": 8192,
-    "response_mime_type": "text/plain",
-}
+# Initialize OpenAI client
+try:
+    client = OpenAI(api_key=api_key)
+    # Test the connection with a simple request
+    test_response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": "test"}],
+        max_tokens=1
+    )
+    st.sidebar.success("✅ OpenAI API connected successfully")
+except Exception as e:
+    st.sidebar.error(f"❌ OpenAI API connection failed: {str(e)}")
 
 # System instruction for the model
 system_instruction = (
@@ -495,7 +501,7 @@ def initialize_session_state():
             'admin': {'password': 'admin123', 'role': 'admin', 'name': 'System Administrator'},
             'doctor1': {'password': 'doctor123', 'role': 'doctor', 'name': 'Dr. Emily Carter', 'department': 'Cardiology'},
             'doctor2': {'password': 'doctor123', 'role': 'doctor', 'name': 'Dr. Sarah Jenkins', 'department': 'Orthopedics'},
-            'patient1': {'password': 'patient123', 'role': 'patient', 'name': 'John Doe'},
+            'patient1': {'password': 'patient123', 'role': 'patient', 'name': 'Akalya'},
         }
     
     if 'appointments' not in st.session_state:
@@ -561,11 +567,44 @@ def add_appointment(patient_name, doctor_name, department, date, time, symptoms=
     st.session_state.appointments.append(appointment)
     return appointment_id
 
+# --- OpenAI Helper Functions ---
+def get_openai_response(messages, temperature=0.7, max_tokens=1500):
+    """Get response from OpenAI API"""
+    try:
+        update_last_api_call()
+        
+        # Add system instruction to messages
+        full_messages = [{"role": "system", "content": system_instruction}] + messages
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # You can change this to "gpt-4" or "gpt-3.5-turbo"
+            messages=full_messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=False
+        )
+        
+        return response.choices[0].message.content
+    except Exception as e:
+        # Check for rate limiting
+        if "rate limit" in str(e).lower() or "429" in str(e):
+            is_rate_error, retry_delay = handle_rate_limit_error(e)
+            if is_rate_error:
+                raise Exception(f"Rate limit exceeded. Please wait {retry_delay} seconds before trying again.")
+        
+        raise Exception(f"OpenAI API error: {str(e)}")
+
+def initialize_chat_history():
+    """Initialize chat history for OpenAI"""
+    if 'openai_messages' not in st.session_state:
+        st.session_state.openai_messages = []
+    
+    if 'openai_client' not in st.session_state:
+        st.session_state.openai_client = client
+
 # --- Initialize session state ---
 initialize_session_state()
-
-# --- Streamlit App ---
-st.set_page_config(page_title="Multilingual Medical Assistant", page_icon="🩺", layout="wide")
+initialize_chat_history()
 
 # Apply custom styling
 set_custom_style()
@@ -1071,28 +1110,27 @@ else:
                 </div>
                 """, unsafe_allow_html=True)
             
-            if 'model' not in st.session_state:
-                st.session_state.model = genai.GenerativeModel(
-                    model_name="gemini-2.5-pro",
-                    generation_config=generation_config,
-                    system_instruction=system_instruction,
-                )
-            if 'chat' not in st.session_state:
-                st.session_state.chat = st.session_state.model.start_chat(history=[])
-            if "messages" not in st.session_state:
-                st.session_state.messages = []
+            # Initialize chat history if not exists
+            if "openai_messages" not in st.session_state:
+                st.session_state.openai_messages = []
+            
+            if "chat_history" not in st.session_state:
+                st.session_state.chat_history = []
 
-            for message in st.session_state.messages:
+            # Display chat history
+            for message in st.session_state.chat_history:
                 with st.chat_message(message["role"]):
                     st.markdown(message["content"])
             
             if prompt := st.chat_input("What is your medical query?"):
-                st.session_state.messages.append({"role": "user", "content": prompt})
+                # Add user message to chat
+                st.session_state.chat_history.append({"role": "user", "content": prompt})
+                st.session_state.openai_messages.append({"role": "user", "content": prompt})
+                
                 with st.chat_message("user"):
                     st.markdown(prompt)
 
                 try:
-                    # FIXED TRANSLATION CODE
                     # Detect language
                     detected_lang_code = detect_language(prompt)
                     detected_lang_name = get_language_name(detected_lang_code)
@@ -1100,7 +1138,6 @@ else:
                     # Translate to English if needed
                     translated_to_english = prompt
                     if detected_lang_code != 'en':
-                        # Use the improved translation function
                         translated_prompt = translate_text(prompt, 'en')
                         if translated_prompt:
                             translated_to_english = translated_prompt
@@ -1122,9 +1159,21 @@ else:
                             
                             while retry_count < max_retries and english_response is None:
                                 try:
+                                    # Update messages for OpenAI
+                                    temp_messages = [{"role": "system", "content": system_instruction}] + st.session_state.openai_messages
+                                    
+                                    # Get response from OpenAI
+                                    response = client.chat.completions.create(
+                                        model="gpt-4o-mini",
+                                        messages=temp_messages,
+                                        temperature=0.7,
+                                        max_tokens=1500,
+                                        stream=False
+                                    )
+                                    
+                                    english_response = response.choices[0].message.content
                                     update_last_api_call()
-                                    response = st.session_state.chat.send_message(translated_to_english)
-                                    english_response = response.text
+                                    
                                 except Exception as e:
                                     is_rate_error, retry_delay = handle_rate_limit_error(e)
                                     
@@ -1147,20 +1196,22 @@ else:
                                        translated_response_to_original = final_response
                                     else:
                                         st.warning("Could not translate the response back to your language. Displaying the original English response.")
-
-
-                        if english_response:
-                            st.markdown(translated_response_to_original)
-                            with st.expander("See original response from the doctor (AI)"):
-                                st.write(english_response)
-                            st.session_state.messages.append({"role": "assistant", "content": translated_response_to_original})
+                                
+                                # Display the response
+                                st.markdown(translated_response_to_original)
+                                
+                                # Add to chat history
+                                st.session_state.chat_history.append({"role": "assistant", "content": translated_response_to_original})
+                                st.session_state.openai_messages.append({"role": "assistant", "content": english_response})
+                                
+                                with st.expander("See original response from the doctor (AI)"):
+                                    st.write(english_response)
                 
                 except Exception as e:
                     st.error(f"An error occurred during translation or AI response: {str(e)}")
                     # Add debug information
                     st.info("If translation continues to fail, the chatbot will work in English only.")
         
-        # ------------------- CORRECTED HEALTH AWARENESS BLOCK START -------------------
         elif patient_option == "❤️ Health Awareness":
             st.markdown("""
             <div class="section-header">
@@ -1252,7 +1303,6 @@ else:
                     <p>{content}</p>
                 </div>
                 """, unsafe_allow_html=True)
-        # ------------------- CORRECTED HEALTH AWARENESS BLOCK END -------------------
 
         elif patient_option == "🏥 Appointment Assistance":
             st.markdown("""
@@ -1414,10 +1464,6 @@ else:
             st.warning("**Disclaimer:** The information provided here is generated by an AI and is not a substitute for professional medical advice. Always consult a qualified healthcare provider.")
 
             def get_ai_explanation(user_query, prompt_template):
-                if 'model' not in st.session_state:
-                    st.error("Please visit the Chatbot tab first to initialize the AI model.")
-                    return None
-                
                 try:
                     # Check rate limit before making API call
                     is_rate_limited, wait_time = check_rate_limit()
@@ -1435,8 +1481,20 @@ else:
                     while retry_count < max_retries and response_text is None:
                         try:
                             update_last_api_call()
-                            response = st.session_state.model.generate_content(full_prompt)
-                            response_text = response.text
+                            
+                            # Use OpenAI API
+                            response = client.chat.completions.create(
+                                model="gpt-4o-mini",
+                                messages=[
+                                    {"role": "system", "content": system_instruction},
+                                    {"role": "user", "content": full_prompt}
+                                ],
+                                temperature=0.7,
+                                max_tokens=1000,
+                                stream=False
+                            )
+                            
+                            response_text = response.choices[0].message.content
                         except Exception as e:
                             is_rate_error, retry_delay = handle_rate_limit_error(e)
                             

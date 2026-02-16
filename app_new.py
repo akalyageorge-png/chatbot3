@@ -1,9 +1,4 @@
 import streamlit as st
-from openai import OpenAI
-
-# Set page config FIRST - this must be the first Streamlit command
-st.set_page_config(page_title="Multilingual Medical Assistant", page_icon="🩺", layout="wide")
-
 import os
 import datetime
 import ssl
@@ -14,6 +9,7 @@ import http.client
 import urllib.parse
 import time
 import random
+from groq import Groq
 
 # --- FIX for [SSL: CERTIFICATE_VERIFY_FAILED] ---
 try:
@@ -84,7 +80,7 @@ div[data-testid="stVerticalBlock"] > div[style*="flex-direction: column;"] > div
 
 /* Input field styling */
 .stTextInput > div > div > input,
-.stTextArea > div > div > textarea,
+.stTextArea > div > div >textarea,
 .stSelectbox > div > div > select,
 .stDateInput > div > div > input,
 .stTimeInput > div > div > input {
@@ -231,6 +227,14 @@ div[data-testid="metric-container"] {
     padding: 15px;
     margin-bottom: 15px;
 }
+
+/* API Key input styling */
+.api-key-input {
+    background-color: rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 20px;
+}
     </style>
     """, unsafe_allow_html=True)
 
@@ -241,13 +245,13 @@ def check_rate_limit():
         st.session_state.last_api_call = 0
         return False, 0
     
-    # Free tier limit: 2 requests per minute
-    # We'll be conservative and wait 35 seconds between requests
+    # Groq free tier limits: 30 requests per minute for llama3-8b, 15 for mixtral
+    # We'll be conservative and wait 2 seconds between requests
     current_time = time.time()
     time_since_last_call = current_time - st.session_state.last_api_call
-   
-    if time_since_last_call < 2:  # Changed from 35 to 2 seconds
-       return True, 2 - time_since_last_call  # Changed from 35 to 2
+    
+    if time_since_last_call < 2:
+        return True, 2 - time_since_last_call
     
     return False, 0
 
@@ -257,22 +261,11 @@ def update_last_api_call():
 
 def handle_rate_limit_error(error):
     """Handle rate limit errors with retry logic"""
-    if "429" in str(error) or "quota" in str(error).lower() or "rate limit" in str(error).lower():
-        # Extract retry delay if available
-        try:
-            error_str = str(error)
-            if "retry_delay" in error_str:
-                # Try to extract the retry delay from the error message
-                import re
-                match = re.search(r'retry_delay \{ seconds: (\d+)', error_str)
-                if match:
-                    retry_seconds = int(match.group(1))
-                    return True, retry_seconds
-        except:
-            pass
-        
-        # Default to 35 seconds if we can't extract the retry delay
-        return True, 35
+    error_str = str(error)
+    
+    # Check for specific rate limit error messages
+    if "429" in error_str or "quota" in error_str.lower() or "rate limit" in error_str.lower():
+        return True, 5  # Default to 5 seconds for Groq rate limits
     
     return False, 0
 
@@ -313,7 +306,6 @@ def detect_language(text):
     else:
         return 'en'  # Default to English if no match
 
-# ------------------- NEW AND IMPROVED TRANSLATE FUNCTION -------------------
 def translate_text(text, target_lang):
     """
     Translate text using MyMemory API.
@@ -348,8 +340,6 @@ def translate_text(text, target_lang):
         # Any other error (network, etc.) also means failure.
         print(f"An exception occurred during translation: {e}")
         return None
-# ------------------- END OF IMPROVED FUNCTION -------------------
-
 
 def get_language_name(code):
     """Get language name from code"""
@@ -371,35 +361,31 @@ def get_language_name(code):
         'gu': 'Gujarati',
         'kn': 'Kannada',
         'ml': 'Malayalam',
-        'pa': 'Punjabi',
-        'ko': 'Korean',
-        
+        'pa': 'Punjabi'
     }
     return languages.get(code, "Unknown")
 
-# --- OpenAI Configuration ---
-try:
-    api_key = st.secrets["OPENAI_API_KEY"]
-except (FileNotFoundError, KeyError):
-    # Add your key here directly for testing
-    api_key = "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"
-    
-    if "sk-proj-" in api_key:
-        st.warning("Using provided OpenAI API key. For production, add your key to secrets.toml as OPENAI_API_KEY")
+# --- Groq API Setup ---
+GROQ_API_KEY = "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"
 
-# Initialize OpenAI client
-try:
-    client = OpenAI(api_key=api_key)
-    # Test the connection with a simple request
-    test_response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": "test"}],
-        max_tokens=1
-    )
-    st.sidebar.success("✅ OpenAI API connected successfully")
-except Exception as e:
-    st.sidebar.error(f"❌ OpenAI API connection failed: {str(e)}")
+def setup_groq_client():
+    """Setup Groq client with API key"""
+    try:
+        client = Groq(api_key=GROQ_API_KEY)
+        # Test the client with a simple request using a CURRENT model
+        test_completion = client.chat.completions.create(
+            messages=[{"role": "user", "content": "Test"}],
+            model="llama-3.1-8b-instant",  # Updated to a current model
+            max_tokens=10
+        )
+        return client, True, "Groq client configured successfully!"
+    except Exception as e:
+        return None, False, f"Error configuring Groq: {str(e)}"
 
+# Initialize Groq client
+groq_client, groq_configured, groq_message = setup_groq_client()
+
+# --- Configuration ---
 # System instruction for the model
 system_instruction = (
     "You are a helpful medical assistant. "
@@ -409,6 +395,16 @@ system_instruction = (
     "you should suggest some precautions and advise them to consult a doctor if the issue persists. "
     "Always prioritize user safety and recommend professional medical consultation for serious matters."
 )
+
+# Available Groq models
+GROQ_MODELS = {
+    "llama-3.3-70b-versatile": "Llama 3.3 70B (Versatile, high-quality)",
+    "llama-3.1-8b-instant": "Llama 3.1 8B (Fast, efficient for basic queries)",
+    "mixtral-8x7b-32768": "Mixtral 8x7B (Good balance, 32K context)",
+    "gemma2-9b-it": "Gemma 2 9B (Google's model)",
+    "llama3-70b-8192": "Llama 3 70B (Legacy model, may be deprecated soon)"
+}
+
 
 # --- Pre-defined Health Campaign Messages ---
 HEALTH_MESSAGES = {
@@ -524,6 +520,22 @@ def initialize_session_state():
     
     if 'rate_limit_message' not in st.session_state:
         st.session_state.rate_limit_message = None
+    
+    # Initialize chat history
+    if 'messages' not in st.session_state:
+        st.session_state.messages = []
+    
+    # Initialize health info
+    if 'health_info' not in st.session_state:
+        st.session_state.health_info = None
+    
+    # Initialize Groq status
+    if 'groq_configured' not in st.session_state:
+        st.session_state.groq_configured = groq_configured
+    
+    # Initialize selected model
+    if 'selected_model' not in st.session_state:
+        st.session_state.selected_model = "llama3-8b-8192"
 
 def login_user(username, password):
     """Authenticate user login"""
@@ -539,6 +551,8 @@ def logout_user():
     st.session_state.logged_in = False
     st.session_state.current_user = None
     st.session_state.user_role = None
+    st.session_state.messages = []
+    st.session_state.health_info = None
 
 def add_user(username, password, role, name, department=None):
     """Add a new user to the system"""
@@ -569,47 +583,68 @@ def add_appointment(patient_name, doctor_name, department, date, time, symptoms=
     st.session_state.appointments.append(appointment)
     return appointment_id
 
-# --- OpenAI Helper Functions ---
-def get_openai_response(messages, temperature=0.7, max_tokens=1500):
-    """Get response from OpenAI API"""
+# --- Groq Chat Function ---
+def get_groq_response(messages, model="llama3-8b-8192"):
+    """Get response from Groq API"""
     try:
+        # Check rate limit before making API call
+        is_rate_limited, wait_time = check_rate_limit()
+        if is_rate_limited:
+            return None, f"Rate limit exceeded. Please wait {int(wait_time)} seconds before trying again."
+        
+        # Prepare messages with system instruction
+        chat_messages = [{"role": "system", "content": system_instruction}]
+        for msg in messages:
+            chat_messages.append({"role": msg["role"], "content": msg["content"]})
+        
+        # Make API call
         update_last_api_call()
-        
-        # Add system instruction to messages
-        full_messages = [{"role": "system", "content": system_instruction}] + messages
-        
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",  # You can change this to "gpt-4" or "gpt-3.5-turbo"
-            messages=full_messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
+        completion = groq_client.chat.completions.create(
+            messages=chat_messages,
+            model=model,
+            temperature=0.7,
+            max_tokens=2048,
+            top_p=0.95,
             stream=False
         )
         
-        return response.choices[0].message.content
-    except Exception as e:
-        # Check for rate limiting
-        if "rate limit" in str(e).lower() or "429" in str(e):
-            is_rate_error, retry_delay = handle_rate_limit_error(e)
-            if is_rate_error:
-                raise Exception(f"Rate limit exceeded. Please wait {retry_delay} seconds before trying again.")
+        return completion.choices[0].message.content, None
         
-        raise Exception(f"OpenAI API error: {str(e)}")
-
-def initialize_chat_history():
-    """Initialize chat history for OpenAI"""
-    if 'openai_messages' not in st.session_state:
-        st.session_state.openai_messages = []
-    
-    if 'openai_client' not in st.session_state:
-        st.session_state.openai_client = client
+    except Exception as e:
+        return None, f"Error: {str(e)}"
 
 # --- Initialize session state ---
 initialize_session_state()
-initialize_chat_history()
+
+# --- Streamlit App ---
+st.set_page_config(page_title="Multilingual Medical Assistant", page_icon="🩺", layout="wide")
 
 # Apply custom styling
 set_custom_style()
+
+# --- Groq Setup Status ---
+if not st.session_state.groq_configured:
+    st.markdown("""
+    <div class="login-form">
+        <h1 style="text-align: center; color: white; margin-bottom: 30px;">🩺 Multilingual Medical Assistant</h1>
+        <h3 style="text-align: center; color: white;">Groq API Configuration Issue</h3>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1,2,1])
+    with col2:
+        st.markdown("""
+        <div class="api-key-input">
+            <h3 style="text-align: center;">❌ Groq API Connection Failed</h3>
+            <p style="color: #ff6b6b;">{}</p>
+            <p>Please check your API key and try again.</p>
+        </div>
+        """.format(groq_message), unsafe_allow_html=True)
+        
+        if st.button("Retry Connection", use_container_width=True):
+            st.rerun()
+    
+    st.stop()
 
 # --- Login/Logout Section ---
 if not st.session_state.logged_in:
@@ -619,6 +654,12 @@ if not st.session_state.logged_in:
         <h1 style="text-align: center; color: white; margin-bottom: 30px;">🩺 Multilingual Medical Assistant</h1>
     </div>
     """, unsafe_allow_html=True)
+    
+    # Show Groq status
+    if st.session_state.groq_configured:
+        st.success("✅ Groq API Connected: AI Chatbot is available")
+    else:
+        st.error("❌ Groq API Connection Failed: AI Chatbot is disabled")
     
     col1, col2, col3 = st.columns([1,2,1])
     with col2:
@@ -657,6 +698,21 @@ else:
         <p style="color: white; margin-bottom: 0;">Role: {st.session_state.user_role.title()}</p>
     </div>
     """, unsafe_allow_html=True)
+    
+    # Show Groq status in sidebar
+    if st.session_state.groq_configured:
+        st.sidebar.success("✅ Groq AI Chatbot Enabled")
+    else:
+        st.sidebar.error("❌ Groq AI Chatbot Disabled")
+    
+    # Model selection for AI features
+    if st.session_state.groq_configured:
+        st.session_state.selected_model = st.sidebar.selectbox(
+            "🤖 Select AI Model",
+            options=list(GROQ_MODELS.keys()),
+            format_func=lambda x: GROQ_MODELS[x],
+            index=0
+        )
     
     if st.sidebar.button("Logout"):
         logout_user()
@@ -1087,48 +1143,42 @@ else:
         </div>
         """, unsafe_allow_html=True)
 
-        # Patient navigation
-        patient_option = st.sidebar.selectbox(
-            "Patient Menu",
-            ["💬 Chatbot", "❤️ Health Awareness", "🏥 Appointment Assistance", "🩺 Symptom Checker", 
-             "📖 Medical Education", "🧑‍🌾 Rural Healthcare", "📋 My Medical History"]
-        )
+        # Patient navigation (hide AI features if Groq not configured)
+        if st.session_state.groq_configured:
+            patient_options = ["💬 Chatbot", "❤️ Health Awareness", "🏥 Appointment Assistance", "🩺 Symptom Checker", 
+                             "📖 Medical Education", "🧑‍🌾 Rural Healthcare", "📋 My Medical History"]
+        else:
+            patient_options = ["❤️ Health Awareness", "🏥 Appointment Assistance", "🩺 Symptom Checker", 
+                             "📋 My Medical History"]
+        
+        patient_option = st.sidebar.selectbox("Patient Menu", patient_options)
 
-        if patient_option == "💬 Chatbot":
+        if patient_option == "💬 Chatbot" and st.session_state.groq_configured:
             st.markdown("""
             <div class="section-header">
                 <h2>Ask a Medical Question</h2>
             </div>
             """, unsafe_allow_html=True)
             
-            # Check if we need to show a rate limit warning
-            is_rate_limited, wait_time = check_rate_limit()
-            if is_rate_limited:
-                st.markdown(f"""
-                <div class="rate-limit-warning">
-                    <h3>⏱️ Rate Limit Notice</h3>
-                    <p>You've reached the free tier limit for API requests. Please wait <strong>{int(wait_time)} seconds</strong> before making another request.</p>
-                    <p>This is a limitation of the free API tier. For unlimited usage, consider upgrading to a paid plan.</p>
-                </div>
-                """, unsafe_allow_html=True)
+            # Show rate limit information
+            st.markdown("""
+            <div class="rate-limit-warning">
+                <h3>ℹ️ Groq Free Tier Information</h3>
+                <p>Using Groq API with fast inference speeds. Rate limits vary by model.</p>
+                <p>• Llama 3 8B: 30 requests per minute</p>
+                <p>• Mixtral 8x7B: 15 requests per minute</p>
+                <p>If you see rate limit errors, wait a few seconds and try again.</p>
+            </div>
+            """, unsafe_allow_html=True)
             
-            # Initialize chat history if not exists
-            if "openai_messages" not in st.session_state:
-                st.session_state.openai_messages = []
-            
-            if "chat_history" not in st.session_state:
-                st.session_state.chat_history = []
-
             # Display chat history
-            for message in st.session_state.chat_history:
+            for message in st.session_state.messages:
                 with st.chat_message(message["role"]):
                     st.markdown(message["content"])
             
+            # Chat input
             if prompt := st.chat_input("What is your medical query?"):
-                # Add user message to chat
-                st.session_state.chat_history.append({"role": "user", "content": prompt})
-                st.session_state.openai_messages.append({"role": "user", "content": prompt})
-                
+                st.session_state.messages.append({"role": "user", "content": prompt})
                 with st.chat_message("user"):
                     st.markdown(prompt)
 
@@ -1148,70 +1198,36 @@ else:
 
                     with st.chat_message("assistant"):
                         with st.status(f"Detected: {detected_lang_name.title()}. Thinking...", expanded=True):
-                            # Check rate limit before making API call
-                            is_rate_limited, wait_time = check_rate_limit()
-                            if is_rate_limited:
-                                st.error(f"Rate limit exceeded. Please wait {int(wait_time)} seconds before trying again.")
+                            # Get Groq response
+                            response_text, error = get_groq_response(
+                                st.session_state.messages[:-1] + [{"role": "user", "content": translated_to_english}],
+                                st.session_state.selected_model
+                            )
+                            
+                            if error:
+                                st.error(error)
                                 st.stop()
                             
-                            # Get AI response with retry logic
-                            max_retries = 3
-                            retry_count = 0
-                            english_response = None
-                            
-                            while retry_count < max_retries and english_response is None:
-                                try:
-                                    # Update messages for OpenAI
-                                    temp_messages = [{"role": "system", "content": system_instruction}] + st.session_state.openai_messages
-                                    
-                                    # Get response from OpenAI
-                                    response = client.chat.completions.create(
-                                        model="gpt-4o-mini",
-                                        messages=temp_messages,
-                                        temperature=0.7,
-                                        max_tokens=1500,
-                                        stream=False
-                                    )
-                                    
-                                    english_response = response.choices[0].message.content
-                                    update_last_api_call()
-                                    
-                                except Exception as e:
-                                    is_rate_error, retry_delay = handle_rate_limit_error(e)
-                                    
-                                    if is_rate_error and retry_count < max_retries - 1:
-                                        st.warning(f"Rate limit hit. Waiting {retry_delay} seconds before retry...")
-                                        time.sleep(retry_delay)
-                                        retry_count += 1
-                                    else:
-                                        st.error(f"Error: {str(e)}")
-                                        st.stop()
-                            
-                            if english_response:
+                            if response_text:
                                 st.write("Translating response back to your language...")
                                 
                                 # Translate response back to original language if needed
-                                translated_response_to_original = english_response
+                                translated_response_to_original = response_text
                                 if detected_lang_code != 'en':
-                                    final_response = translate_text(english_response, detected_lang_code)
+                                    final_response = translate_text(response_text, detected_lang_code)
                                     if final_response:
-                                       translated_response_to_original = final_response
+                                        translated_response_to_original = final_response
                                     else:
                                         st.warning("Could not translate the response back to your language. Displaying the original English response.")
-                                
-                                # Display the response
-                                st.markdown(translated_response_to_original)
-                                
-                                # Add to chat history
-                                st.session_state.chat_history.append({"role": "assistant", "content": translated_response_to_original})
-                                st.session_state.openai_messages.append({"role": "assistant", "content": english_response})
-                                
-                                with st.expander("See original response from the doctor (AI)"):
-                                    st.write(english_response)
+
+                        if response_text:
+                            st.markdown(translated_response_to_original)
+                            with st.expander("See original response from the AI"):
+                                st.write(response_text)
+                            st.session_state.messages.append({"role": "assistant", "content": translated_response_to_original})
                 
                 except Exception as e:
                     st.error(f"An error occurred during translation or AI response: {str(e)}")
-                    # Add debug information
                     st.info("If translation continues to fail, the chatbot will work in English only.")
         
         elif patient_option == "❤️ Health Awareness":
@@ -1243,9 +1259,6 @@ else:
             </div>
             """, unsafe_allow_html=True)
             
-            if 'health_info' not in st.session_state:
-                st.session_state.health_info = None
-
             def set_health_info(topic_key):
                 topic = HEALTH_MESSAGES[topic_key]
                 
@@ -1455,7 +1468,7 @@ else:
                     </div>
                     """, unsafe_allow_html=True)
 
-        elif patient_option == "📖 Medical Education":
+        elif patient_option == "📖 Medical Education" and st.session_state.groq_configured:
             st.markdown("""
             <div class="section-header">
                 <h2>📖 Medical Education & Patient Guidance</h2>
@@ -1465,50 +1478,29 @@ else:
             
             st.warning("**Disclaimer:** The information provided here is generated by an AI and is not a substitute for professional medical advice. Always consult a qualified healthcare provider.")
 
-            def get_ai_explanation(user_query, prompt_template):
+            def get_groq_explanation(user_query, prompt_template):
                 try:
+                    full_prompt = prompt_template.format(query=user_query)
+                    
                     # Check rate limit before making API call
                     is_rate_limited, wait_time = check_rate_limit()
                     if is_rate_limited:
                         st.error(f"Rate limit exceeded. Please wait {int(wait_time)} seconds before trying again.")
                         return None
                     
-                    full_prompt = prompt_template.format(query=user_query)
+                    update_last_api_call()
+                    completion = groq_client.chat.completions.create(
+                        messages=[{"role": "system", "content": system_instruction},
+                                 {"role": "user", "content": full_prompt}],
+                        model=st.session_state.selected_model,
+                        temperature=0.7,
+                        max_tokens=2048,
+                        top_p=0.95,
+                        stream=False
+                    )
                     
-                    # Get AI response with retry logic
-                    max_retries = 3
-                    retry_count = 0
-                    response_text = None
+                    return completion.choices[0].message.content
                     
-                    while retry_count < max_retries and response_text is None:
-                        try:
-                            update_last_api_call()
-                            
-                            # Use OpenAI API
-                            response = client.chat.completions.create(
-                                model="gpt-4o-mini",
-                                messages=[
-                                    {"role": "system", "content": system_instruction},
-                                    {"role": "user", "content": full_prompt}
-                                ],
-                                temperature=0.7,
-                                max_tokens=1000,
-                                stream=False
-                            )
-                            
-                            response_text = response.choices[0].message.content
-                        except Exception as e:
-                            is_rate_error, retry_delay = handle_rate_limit_error(e)
-                            
-                            if is_rate_error and retry_count < max_retries - 1:
-                                st.warning(f"Rate limit hit. Waiting {retry_delay} seconds before retry...")
-                                time.sleep(retry_delay)
-                                retry_count += 1
-                            else:
-                                st.error(f"Error: {str(e)}")
-                                return None
-                    
-                    return response_text
                 except Exception as e:
                     st.error(f"An error occurred while communicating with the AI: {e}")
                     return None
@@ -1526,7 +1518,7 @@ else:
             if submit_term and term_to_explain:
                 prompt = "Explain the medical term '{query}' in simple, easy-to-understand language for a patient. Do not give any medical advice. Start by defining the term clearly."
                 with st.spinner(f"Generating explanation for '{term_to_explain}'..."):
-                    explanation = get_ai_explanation(term_to_explain, prompt)
+                    explanation = get_groq_explanation(term_to_explain, prompt)
                     if explanation:
                         st.markdown(f"""
                         <div style="background-color: rgba(78, 115, 223, 0.3); border-radius: 10px; padding: 15px;">
@@ -1548,7 +1540,7 @@ else:
             if submit_med and med_name:
                 prompt = "Provide general patient information about the medication '{query}'. Include what it is typically used for and common precautions in simple language. Do not provide dosage information or medical advice. State clearly that this information does not replace a doctor's prescription."
                 with st.spinner(f"Getting information for '{med_name}'..."):
-                    explanation = get_ai_explanation(med_name, prompt)
+                    explanation = get_groq_explanation(med_name, prompt)
                     if explanation:
                         st.markdown(f"""
                         <div style="background-color: rgba(78, 115, 223, 0.3); border-radius: 10px; padding: 15px;">
@@ -1574,7 +1566,7 @@ else:
             if submit_lab and report_item:
                 prompt = "Explain what the following lab report item '{query}' generally measures or indicates, in simple, easy-to-understand language for a patient. Explain what 'high' or 'low' levels might generally suggest. Do not provide a diagnosis or medical advice. Emphasize the importance of discussing results with a doctor."
                 with st.spinner(f"Generating explanation for '{report_item}'..."):
-                    explanation = get_ai_explanation(report_item, prompt)
+                    explanation = get_groq_explanation(report_item, prompt)
                     if explanation:
                         st.markdown(f"""
                         <div style="background-color: rgba(78, 115, 223, 0.3); border-radius: 10px; padding: 15px;">
@@ -1583,7 +1575,7 @@ else:
                         </div>
                         """, unsafe_allow_html=True)
 
-        elif patient_option == "🧑‍🌾 Rural Healthcare":
+        elif patient_option == "🧑‍🌾 Rural Healthcare" and st.session_state.groq_configured:
             st.markdown("""
             <div class="section-header">
                 <h2>🧑‍🌾 Rural & Remote Healthcare Assistance</h2>

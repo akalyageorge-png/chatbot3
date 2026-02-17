@@ -366,7 +366,7 @@ def get_language_name(code):
     return languages.get(code, "Unknown")
 
 # --- Groq API Setup ---
-GROQ_API_KEY = "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"
+GROQ_API_KEY = "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"
 
 def setup_groq_client():
     """Setup Groq client with API key"""
